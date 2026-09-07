@@ -1,0 +1,11 @@
+
+# Third-party MPV runtime
+src/MagicViewWallpaper.App/Runtime/mpv/mpv.exe
+
+# .NET build outputs
+**/bin/
+**/obj/
+artifacts/
+outputs/
+*.user
+*.suo

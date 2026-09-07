@@ -444,23 +444,6 @@ dotnet publish .\src\MagicViewWallpaper.App\MagicViewWallpaper.App.csproj `
 5. 建立 GitHub Actions 构建、版本号、校验和及 Release 流程。
 6. 制作 MSIX/WiX 安装包并提供干净卸载。
 
-## GitHub 发布前注意事项
-
-### 项目许可证
-
-当前仓库尚未包含 `LICENSE`。公开上传前请为项目源码选择许可证，例如 MIT、Apache-2.0 或 GPL。没有许可证时，其他人默认没有复制、修改和分发源码的授权。
-
-### MPV 及其运行库
-
-`Runtime/mpv/` 中的 MPV 可执行文件和 DLL 属于第三方组件，不自动适用本项目的源码许可证。发布前必须：
-
-1. 确认所使用 MPV 构建的许可证及编译选项。
-2. 保留对应版权、许可证文本和源码获取说明。
-3. 区分本项目源码许可证与第三方二进制许可证。
-4. 如果不在 Git 仓库分发二进制，可在 Release 流程中下载经确认的 MPV 构建，或要求用户自行放置运行时。
-
-建议不要提交 `bin/`、`obj/`、本地日志、用户壁纸、缩略图缓存和发布输出目录；通过 `.gitignore` 排除这些内容，只在 GitHub Releases 中提供正式构建产物。
-
 ## 参与开发与反馈
 
 提交 Issue 时建议附带：
