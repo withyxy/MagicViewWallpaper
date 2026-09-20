@@ -8,7 +8,7 @@ public sealed class EngineService : IDisposable
     public static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase) { ".mp4", ".webm", ".mkv", ".avi", ".mov", ".wmv", ".m4v" };
     public static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".bmp" };
     readonly SettingsStore store;
-    sealed class Surface { public required string DeviceName { get; init; } public required Process Player { get; init; } public required IntPtr Canvas { get; init; } }
+    sealed class Surface { public required string DeviceName { get; init; } public required Process Player { get; init; } public required IntPtr Canvas { get; init; } public required System.Drawing.Rectangle Area { get; set; } }
     List<Surface> surfaces = [];
     public bool IsRunning => surfaces.Count > 0 && surfaces.All(x => !x.Player.HasExited && Native.IsWindow(x.Canvas));
 
@@ -34,25 +34,87 @@ public sealed class EngineService : IDisposable
                 var nextCanvas = Native.CreateCanvas(displayBounds);
                 if (nextCanvas == IntPtr.Zero) throw new InvalidOperationException($"{screen.DeviceName}: {Native.LastErrorMessage}");
                 store.Log($"画布布局 {screen.DeviceName}: {Native.LastLayoutMessage}");
+                var canvasArea = Native.CanvasArea(displayBounds);
+                if (canvasArea.Width <= 0 || canvasArea.Height <= 0) throw new InvalidOperationException($"{screen.DeviceName}: 无法取得壁纸画布区域。");
                 var args = PlayerArguments(nextCanvas, item, settings);
                 var psi = new ProcessStartInfo(mpv) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(mpv)! };
                 foreach (var argument in args) psi.ArgumentList.Add(argument);
                 var next = Process.Start(psi) ?? throw new InvalidOperationException("MPV 启动失败。");
-                nextSurfaces.Add(new Surface { DeviceName = screen.DeviceName, Player = next, Canvas = nextCanvas });
+                nextSurfaces.Add(new Surface { DeviceName = screen.DeviceName, Player = next, Canvas = nextCanvas, Area = canvasArea });
             }
             await Task.Delay(item.IsVideo ? 700 : 1000);
             var failed = nextSurfaces.FirstOrDefault(x => x.Player.HasExited);
             if (failed != null) throw new InvalidOperationException($"{failed.DeviceName} 的 MPV 启动失败，退出码 {failed.Player.ExitCode}。");
-            foreach (var next in nextSurfaces)
-            {
-                var lower = surfaces.FirstOrDefault(x => x.DeviceName.Equals(next.DeviceName, StringComparison.OrdinalIgnoreCase));
-                if (lower != null) Native.PlaceAbove(next.Canvas, lower.Canvas);
-            }
-            int duration = Math.Max(0, settings.TransitionDurationMs), steps = 30;
-            for (int i = 0; i <= steps; i++) { foreach (var next in nextSurfaces) Native.SetOpacity(next.Canvas, (byte)(255 * i / steps)); if (duration > 0) await Task.Delay(Math.Max(1, duration / steps)); }
-            StopCurrent(); surfaces = nextSurfaces; nextSurfaces = []; settings.CurrentWallpaper = item.Path; store.Save(settings); store.Log($"应用 {item.TypeLabel}壁纸到 {string.Join(", ", surfaces.Select(x => x.DeviceName))}：{item.Path}");
+            await RunTransition(nextSurfaces, settings);
+            StopCurrent();
+            // Transitions temporarily place the incoming canvas above the outgoing
+            // canvas. Once the old canvas is destroyed, put the surviving canvas
+            // back at the bottom of the Magic View host's child Z-order. Otherwise
+            // it can remain above Explorer's desktop icon view and hide shortcuts.
+            // Do this only once after a switch; repeating it from Resize() causes
+            // the original Magic View wallpaper to flash during every re-layout.
+            foreach (var nextSurface in nextSurfaces) Native.SendToBottom(nextSurface.Canvas);
+            surfaces = nextSurfaces; nextSurfaces = []; settings.CurrentWallpaper = item.Path; store.Save(settings); store.Log($"应用 {item.TypeLabel}壁纸到 {string.Join(", ", surfaces.Select(x => x.DeviceName))}：{item.Path}");
         }
         finally { Stop(nextSurfaces); }
+    }
+
+    async Task RunTransition(List<Surface> nextSurfaces, AppSettings settings)
+    {
+        int duration = Math.Clamp(settings.TransitionDurationMs, 0, 5000);
+        string mode = settings.TransitionMode is "SlideLeft" or "SlideRight" or "Direct" ? settings.TransitionMode : "Fade";
+
+        foreach (var next in nextSurfaces)
+        {
+            var old = surfaces.FirstOrDefault(x => x.DeviceName.Equals(next.DeviceName, StringComparison.OrdinalIgnoreCase));
+            if (old != null) Native.PlaceAbove(next.Canvas, old.Canvas);
+        }
+
+        if (mode == "Direct" || duration == 0)
+        {
+            foreach (var next in nextSurfaces) Native.SetOpacity(next.Canvas, 255);
+            return;
+        }
+
+        int steps = Math.Clamp(duration / 16, 12, 90);
+        if (mode is "SlideLeft" or "SlideRight")
+        {
+            int direction = mode == "SlideLeft" ? 1 : -1;
+            foreach (var next in nextSurfaces)
+            {
+                Native.MoveCanvas(next.Canvas, next.Area.X + direction * next.Area.Width, next.Area.Y, next.Area.Width, next.Area.Height);
+                Native.SetOpacity(next.Canvas, 255);
+            }
+
+            for (int i = 0; i <= steps; i++)
+            {
+                double progress = (double)i / steps;
+                double eased = 1 - Math.Pow(1 - progress, 3);
+                foreach (var next in nextSurfaces)
+                {
+                    int offset = (int)Math.Round(direction * next.Area.Width * (1 - eased));
+                    Native.MoveCanvas(next.Canvas, next.Area.X + offset, next.Area.Y, next.Area.Width, next.Area.Height);
+                    var old = surfaces.FirstOrDefault(x => x.DeviceName.Equals(next.DeviceName, StringComparison.OrdinalIgnoreCase));
+                    if (old != null)
+                    {
+                        int oldOffset = (int)Math.Round(-direction * old.Area.Width * eased);
+                        Native.MoveCanvas(old.Canvas, old.Area.X + oldOffset, old.Area.Y, old.Area.Width, old.Area.Height);
+                    }
+                }
+                await Task.Delay(Math.Max(1, duration / steps));
+            }
+            return;
+        }
+
+        // The new canvas must be above the old canvas. Earlier builds placed it
+        // behind the opaque old surface, making this animation look instantaneous.
+        for (int i = 0; i <= steps; i++)
+        {
+            double progress = (double)i / steps;
+            double eased = progress * progress * (3 - 2 * progress);
+            foreach (var next in nextSurfaces) Native.SetOpacity(next.Canvas, (byte)Math.Round(255 * eased));
+            await Task.Delay(Math.Max(1, duration / steps));
+        }
     }
 
     static IReadOnlyList<System.Windows.Forms.Screen> TargetScreens(string target)
@@ -96,7 +158,18 @@ public sealed class EngineService : IDisposable
         args.Add("--"); args.Add(item.Path); return args;
     }
 
-    public void Resize() { foreach (var surface in surfaces) { var screen = System.Windows.Forms.Screen.AllScreens.FirstOrDefault(x => x.DeviceName.Equals(surface.DeviceName, StringComparison.OrdinalIgnoreCase)); if (screen != null) Native.ResizeCanvas(surface.Canvas, EffectiveBounds(screen)); } }
+    public void Resize()
+    {
+        foreach (var surface in surfaces)
+        {
+            var screen = System.Windows.Forms.Screen.AllScreens.FirstOrDefault(x => x.DeviceName.Equals(surface.DeviceName, StringComparison.OrdinalIgnoreCase));
+            if (screen == null) continue;
+            var bounds = EffectiveBounds(screen);
+            Native.ResizeCanvas(surface.Canvas, bounds);
+            var area = Native.CanvasArea(bounds);
+            if (area.Width > 0 && area.Height > 0) surface.Area = area;
+        }
+    }
     static void Stop(IEnumerable<Surface> values) { foreach (var surface in values) { try { if (!surface.Player.HasExited) surface.Player.Kill(true); } catch { } surface.Player.Dispose(); if (surface.Canvas != IntPtr.Zero) Native.DestroyWindow(surface.Canvas); } }
     public void StopCurrent() { Stop(surfaces); surfaces = []; }
     public void Dispose() => StopCurrent();
@@ -214,6 +287,8 @@ public sealed class EngineService : IDisposable
             SetWindowPos(c, IntPtr.Zero, x, y, w, h, 0x14);
         }
         public static void SetOpacity(IntPtr c, byte a) => SetLayeredWindowAttributes(c, 0, a, 2);
-        public static void PlaceAbove(IntPtr c, IntPtr lower) => SetWindowPos(c, lower, 0, 0, 0, 0, 0x53);
+        public static void MoveCanvas(IntPtr c, int x, int y, int w, int h) => SetWindowPos(c, IntPtr.Zero, x, y, w, h, 0x14);
+        public static void PlaceAbove(IntPtr c, IntPtr lower) => SetWindowPos(lower, c, 0, 0, 0, 0, 0x53);
+        public static void SendToBottom(IntPtr c) => SetWindowPos(c, new IntPtr(1), 0, 0, 0, 0, 0x53);
     }
 }

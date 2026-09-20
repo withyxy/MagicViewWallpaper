@@ -8,6 +8,7 @@ public sealed class AppSettings
     public bool AutoSwitchEnabled { get; set; } = true;
     public int SwitchIntervalSeconds { get; set; } = 300;
     public int TransitionDurationMs { get; set; } = 900;
+    public string TransitionMode { get; set; } = "Fade";
     public string FitMode { get; set; } = "Cover";
     public string TargetMonitor { get; set; } = "PRIMARY";
     public int VideoFpsLimit { get; set; }

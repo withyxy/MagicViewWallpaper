@@ -29,7 +29,7 @@ public partial class MainWindow : Window
         Closed += (_, _) => { timer.Stop(); catalog.Dispose(); };
     }
     void ShowPage(bool library) { LibraryPage.Visibility = library ? Visibility.Visible : Visibility.Collapsed; SettingsPage.Visibility = library ? Visibility.Collapsed : Visibility.Visible; }
-    void LoadSettings() { AutoSwitch.IsChecked = settings.AutoSwitchEnabled; IntervalBox.Text = settings.SwitchIntervalSeconds.ToString(); TransitionBox.Text = settings.TransitionDurationMs.ToString(); SelectTag(FitModeBox, settings.FitMode); SelectTag(FpsBox, settings.VideoFpsLimit.ToString()); LoadMonitors(); }
+    void LoadSettings() { AutoSwitch.IsChecked = settings.AutoSwitchEnabled; IntervalBox.Text = settings.SwitchIntervalSeconds.ToString(); TransitionBox.Text = settings.TransitionDurationMs.ToString(); SelectTag(TransitionModeBox, settings.TransitionMode); SelectTag(FitModeBox, settings.FitMode); SelectTag(FpsBox, settings.VideoFpsLimit.ToString()); LoadMonitors(); }
     void LoadMonitors()
     {
         MonitorBox.Items.Clear();
@@ -45,7 +45,7 @@ public partial class MainWindow : Window
         SelectTag(MonitorBox, settings.TargetMonitor);
     }
     static void SelectTag(ComboBox box, string tag) { box.SelectedItem = box.Items.Cast<ComboBoxItem>().FirstOrDefault(x => x.Tag?.ToString() == tag) ?? box.Items[0]; }
-    async Task Save() { settings.AutoSwitchEnabled = AutoSwitch.IsChecked == true; if (int.TryParse(IntervalBox.Text, out int i)) settings.SwitchIntervalSeconds = Math.Max(10, i); if (int.TryParse(TransitionBox.Text, out int t)) settings.TransitionDurationMs = Math.Clamp(t, 0, 5000); settings.FitMode = ((ComboBoxItem)FitModeBox.SelectedItem).Tag!.ToString()!; settings.VideoFpsLimit = int.Parse(((ComboBoxItem)FpsBox.SelectedItem).Tag!.ToString()!); settings.TargetMonitor = ((ComboBoxItem)MonitorBox.SelectedItem).Tag!.ToString()!; store.Save(settings); var reply = await client.SendAsync("ReloadSettings"); UpdateStatus(reply); MessageBox.Show(reply.Success ? "设置已保存；重新应用壁纸后，显示器选择将生效。" : reply.Message, "MagicView Wallpaper"); }
+    async Task Save() { settings.AutoSwitchEnabled = AutoSwitch.IsChecked == true; if (int.TryParse(IntervalBox.Text, out int i)) settings.SwitchIntervalSeconds = Math.Max(10, i); if (int.TryParse(TransitionBox.Text, out int t)) settings.TransitionDurationMs = Math.Clamp(t, 0, 5000); settings.TransitionMode = ((ComboBoxItem)TransitionModeBox.SelectedItem).Tag!.ToString()!; settings.FitMode = ((ComboBoxItem)FitModeBox.SelectedItem).Tag!.ToString()!; settings.VideoFpsLimit = int.Parse(((ComboBoxItem)FpsBox.SelectedItem).Tag!.ToString()!); settings.TargetMonitor = ((ComboBoxItem)MonitorBox.SelectedItem).Tag!.ToString()!; store.Save(settings); var reply = await client.SendAsync("ReloadSettings"); UpdateStatus(reply); ModernDialog.Show(this, reply.Success ? "设置已保存" : "保存失败", reply.Success ? "新的播放与切换设置将在下一次切换时生效。" : reply.Message, reply.Success ? DialogKind.Success : DialogKind.Error); }
     void Refresh() { items = catalog.Scan(settings).ToList(); LibrarySummary.Text = $"{items.Count} 张壁纸 · {items.Count(x => x.IsVideo)} 个动态 · {items.Count(x => !x.IsVideo)} 张静态"; Render(); }
     void Render()
     {
@@ -64,7 +64,7 @@ public partial class MainWindow : Window
     }
     static SolidColorBrush Brush(string hex) => new(ColorOf(hex)); static Color ColorOf(string hex) => (Color)ColorConverter.ConvertFromString(hex);
     async Task LoadVideoThumbnail(Grid grid, WallpaperItem item) { var path = await thumbnails.GetOrCreateAsync(item); if (path == null || !File.Exists(path)) return; await Dispatcher.InvokeAsync(() => { try { var bmp = new BitmapImage(); bmp.BeginInit(); bmp.CacheOption = BitmapCacheOption.OnLoad; bmp.DecodePixelWidth = 430; bmp.UriSource = new Uri(path); bmp.EndInit(); grid.Background = new ImageBrush(bmp) { Stretch = Stretch.UniformToFill }; } catch { } }); }
-    async Task ApplySelectedItem() { if (selected == null) { MessageBox.Show("请先选择一张壁纸。"); return; } await Apply(selected); }
+    async Task ApplySelectedItem() { if (selected == null) { ModernDialog.Show(this, "尚未选择壁纸", "请先在壁纸库中选择一张壁纸，再点击“应用所选”。", DialogKind.Warning); return; } await Apply(selected); }
     async Task ApplyRandom() { var started = await client.EnsureStartedAsync(); if (!started.Success) { ShowEngineError(started); return; } var reply = await client.SendAsync("Next", timeoutMs: 12000); UpdateStatus(reply); if (!reply.Success) ShowEngineError(reply); }
     async Task Apply(WallpaperItem item) { EngineStatus.Text = "正在加载…"; var started = await client.EnsureStartedAsync(); if (!started.Success) { ShowEngineError(started); return; } var reply = await client.SendAsync("Apply", item.Path, 12000); UpdateStatus(reply); if (reply.Success) CurrentName.Text = item.Name; else ShowEngineError(reply); }
     async Task Tick() { UpdateStatus(await client.SendAsync("Status", timeoutMs: 800)); }
@@ -81,9 +81,9 @@ public partial class MainWindow : Window
         }
         finally { StartupToggle.IsEnabled = true; }
     }
-    async Task SendControl(string action) { var started = action == "Shutdown" ? await client.SendAsync("Status", timeoutMs: 800) : await client.EnsureStartedAsync(); if (!started.Success) { ShowEngineError(started); return; } var reply = await client.SendAsync(action, timeoutMs: 8000); UpdateStatus(reply); if (!reply.Success) ShowEngineError(reply); else if (action is "InstallStartup" or "RemoveStartup") MessageBox.Show(reply.Message, "MagicView Wallpaper"); }
+    async Task SendControl(string action) { var started = action == "Shutdown" ? await client.SendAsync("Status", timeoutMs: 800) : await client.EnsureStartedAsync(); if (!started.Success) { ShowEngineError(started); return; } var reply = await client.SendAsync(action, timeoutMs: 8000); UpdateStatus(reply); if (!reply.Success) ShowEngineError(reply); else if (action is "InstallStartup" or "RemoveStartup") ModernDialog.Show(this, "MagicView Wallpaper", reply.Message, DialogKind.Success); }
     void UpdateStatus(EngineReply reply) { if (reply.Success) { startupEnabled = reply.StartupEnabled; StartupToggle.IsChecked = startupEnabled; } EngineStatus.Text = reply.Running ? (reply.StartupEnabled ? "引擎运行中 · 已开机启动" : "引擎运行中") : "引擎未运行"; StatusDot.Fill = Brush(reply.Running ? "#5AF2A5" : "#607078"); if (!string.IsNullOrWhiteSpace(reply.CurrentWallpaper)) CurrentName.Text = Path.GetFileNameWithoutExtension(reply.CurrentWallpaper); }
-    static void ShowEngineError(EngineReply reply) => MessageBox.Show(reply.Message, "后台引擎", MessageBoxButton.OK, MessageBoxImage.Error);
+    void ShowEngineError(EngineReply reply) => ModernDialog.Show(this, "后台引擎", reply.Message, DialogKind.Error);
     void ImportFileList() { var d = new OpenFileDialog { Multiselect = true, Filter = "壁纸文件|*.jpg;*.jpeg;*.png;*.bmp;*.mp4;*.webm;*.mkv;*.avi;*.mov;*.wmv;*.m4v|所有文件|*.*" }; if (d.ShowDialog() == true) { foreach (var p in d.FileNames) CopyIntoLibrary(p); EnsureLibrary(); Refresh(); } }
     void ImportDirectory() { var d = new OpenFolderDialog { Title = "选择包含壁纸的文件夹" }; if (d.ShowDialog() == true) { foreach (var pattern in Filters) foreach (var p in Directory.EnumerateFiles(d.FolderName, pattern, SearchOption.AllDirectories)) CopyIntoLibrary(p); EnsureLibrary(); Refresh(); } }
     void CopyIntoLibrary(string source) { string dest = Path.Combine(store.LibraryRoot, Path.GetFileName(source)); if (File.Exists(dest)) dest = Path.Combine(store.LibraryRoot, $"{Path.GetFileNameWithoutExtension(source)}_{DateTime.Now:yyyyMMddHHmmssfff}{Path.GetExtension(source)}"); File.Copy(source, dest); }
