@@ -8,7 +8,7 @@ public sealed class EngineService : IDisposable
     public static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase) { ".mp4", ".webm", ".mkv", ".avi", ".mov", ".wmv", ".m4v" };
     public static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".bmp" };
     readonly SettingsStore store;
-    sealed class Surface { public required string DeviceName { get; init; } public required Process Player { get; init; } public required IntPtr Canvas { get; init; } public required System.Drawing.Rectangle Area { get; set; } }
+    sealed class Surface { public required string DeviceName { get; init; } public required Process Player { get; init; } public required IntPtr Canvas { get; init; } public required System.Drawing.Rectangle DisplayBounds { get; init; } public required System.Drawing.Rectangle Area { get; set; } }
     List<Surface> surfaces = [];
     public bool IsRunning => surfaces.Count > 0 && surfaces.All(x => !x.Player.HasExited && Native.IsWindow(x.Canvas));
 
@@ -40,20 +40,17 @@ public sealed class EngineService : IDisposable
                 var psi = new ProcessStartInfo(mpv) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(mpv)! };
                 foreach (var argument in args) psi.ArgumentList.Add(argument);
                 var next = Process.Start(psi) ?? throw new InvalidOperationException("MPV 启动失败。");
-                nextSurfaces.Add(new Surface { DeviceName = screen.DeviceName, Player = next, Canvas = nextCanvas, Area = canvasArea });
+                nextSurfaces.Add(new Surface { DeviceName = screen.DeviceName, Player = next, Canvas = nextCanvas, DisplayBounds = displayBounds, Area = canvasArea });
             }
             await Task.Delay(item.IsVideo ? 700 : 1000);
             var failed = nextSurfaces.FirstOrDefault(x => x.Player.HasExited);
             if (failed != null) throw new InvalidOperationException($"{failed.DeviceName} 的 MPV 启动失败，退出码 {failed.Player.ExitCode}。");
             await RunTransition(nextSurfaces, settings);
             StopCurrent();
-            // Transitions temporarily place the incoming canvas above the outgoing
-            // canvas. Once the old canvas is destroyed, put the surviving canvas
-            // back at the bottom of the Magic View host's child Z-order. Otherwise
-            // it can remain above Explorer's desktop icon view and hide shortcuts.
-            // Do this only once after a switch; repeating it from Resize() causes
-            // the original Magic View wallpaper to flash during every re-layout.
-            foreach (var nextSurface in nextSurfaces) Native.SendToBottom(nextSurface.Canvas);
+            // Keep the wallpaper as a sibling immediately behind the Magic View
+            // desktop host. A child canvas always covers pixels drawn by its parent,
+            // including Magic View's own desktop icons.
+            foreach (var nextSurface in nextSurfaces) Native.SendBehindDesktop(nextSurface.Canvas, nextSurface.DisplayBounds);
             surfaces = nextSurfaces; nextSurfaces = []; settings.CurrentWallpaper = item.Path; store.Save(settings); store.Log($"应用 {item.TypeLabel}壁纸到 {string.Join(", ", surfaces.Select(x => x.DeviceName))}：{item.Path}");
         }
         finally { Stop(nextSurfaces); }
@@ -176,6 +173,10 @@ public sealed class EngineService : IDisposable
 
     static class Native
     {
+        const int GWLP_WNDPROC = -4, WM_NCHITTEST = 0x0084, WM_MOUSEACTIVATE = 0x0021;
+        static readonly WndProc CanvasWindowProcDelegate = CanvasWindowProc;
+        static readonly Dictionary<IntPtr, IntPtr> OriginalWindowProcedures = [];
+        delegate IntPtr WndProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
         const int WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000;
         const int WS_EX_TRANSPARENT = 0x20, WS_EX_LAYERED = 0x80000, WS_EX_NOACTIVATE = 0x08000000;
         [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
@@ -198,6 +199,8 @@ public sealed class EngineService : IDisposable
         [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int height, uint flags);
         [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
         [DllImport("user32.dll")] static extern bool EnableWindow(IntPtr h, bool enable);
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] static extern IntPtr SetWindowLongPtr(IntPtr h, int index, IntPtr value);
+        [DllImport("user32.dll")] static extern IntPtr CallWindowProc(IntPtr previous, IntPtr h, uint message, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr h);
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
         static IntPtr Host()
@@ -264,16 +267,30 @@ public sealed class EngineService : IDisposable
             h = bottomRight.Y - topLeft.Y;
             return w > 0 && h > 0;
         }
+        static bool DesktopLayer(System.Drawing.Rectangle bounds, out IntPtr host, out IntPtr parent, out int x, out int y, out int w, out int h)
+        {
+            host = HostFor(bounds);
+            parent = host == IntPtr.Zero ? IntPtr.Zero : GetParent(host);
+            if (parent == IntPtr.Zero) { x = y = w = h = 0; return false; }
+            return Area(parent, bounds, out x, out y, out w, out h);
+        }
         public static string LastErrorMessage { get; private set; } = "Magic 视界壁纸画布创建失败。";
         public static string LastLayoutMessage { get; private set; } = "尚未创建画布。";
         public static System.Drawing.Rectangle CanvasArea(System.Drawing.Rectangle bounds)
         {
-            var host = HostFor(bounds);
-            return host != IntPtr.Zero && Area(host, bounds, out int x, out int y, out int w, out int h)
+            return DesktopLayer(bounds, out _, out _, out int x, out int y, out int w, out int h)
                 ? new System.Drawing.Rectangle(x, y, w, h)
                 : System.Drawing.Rectangle.Empty;
         }
-        public static IntPtr CreateCanvas(System.Drawing.Rectangle bounds) { var host = HostFor(bounds); if (host == IntPtr.Zero) { LastErrorMessage = "未找到 Magic 视界桌面宿主，请确认 Magic 视界已开启。"; return IntPtr.Zero; } if (!Area(host, bounds, out int x, out int y, out int w, out int h)) { LastErrorMessage = "已找到 Magic 视界宿主，但无法取得目标显示器区域。"; return IntPtr.Zero; } LastLayoutMessage = $"Host=0x{host.ToInt64():X}, Screen={bounds}, Child=({x},{y},{w},{h})"; var c = CreateWindowEx(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, "Static", "MagicViewWallpaperCanvas", WS_CHILD | WS_VISIBLE, x, y, w, h, host, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero); if (c == IntPtr.Zero) { int error = Marshal.GetLastWin32Error(); LastErrorMessage = $"已找到 Magic 视界宿主，但无法创建壁纸画布（Win32 错误 {error}）。请以管理员身份运行。"; return IntPtr.Zero; } EnableWindow(c, false); SetOpacity(c, 0); SetWindowPos(c, new IntPtr(1), x, y, w, h, 0x50); return c; }
+        public static IntPtr CreateCanvas(System.Drawing.Rectangle bounds) { if (!DesktopLayer(bounds, out var host, out var parent, out int x, out int y, out int w, out int h)) { LastErrorMessage = "未找到可挂载的 Magic 视界桌面层，请确认 Magic 视界已开启。"; return IntPtr.Zero; } LastLayoutMessage = $"Host=0x{host.ToInt64():X}, Parent=0x{parent.ToInt64():X}, Screen={bounds}, Sibling=({x},{y},{w},{h})"; var c = CreateWindowEx(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, "Static", "MagicViewWallpaperCanvas", WS_CHILD | WS_VISIBLE, x, y, w, h, parent, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero); if (c == IntPtr.Zero) { int error = Marshal.GetLastWin32Error(); LastErrorMessage = $"已找到 Magic 视界宿主，但无法创建壁纸画布（Win32 错误 {error}）。"; return IntPtr.Zero; } var original = SetWindowLongPtr(c, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(CanvasWindowProcDelegate)); if (original != IntPtr.Zero) OriginalWindowProcedures[c] = original; EnableWindow(c, false); SetOpacity(c, 0); SetWindowPos(c, host, x, y, w, h, 0x50); return c; }
+        static IntPtr CanvasWindowProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam)
+        {
+            if (message == WM_NCHITTEST) return new IntPtr(-1); // HTTRANSPARENT
+            if (message == WM_MOUSEACTIVATE) return new IntPtr(3); // MA_NOACTIVATE
+            return OriginalWindowProcedures.TryGetValue(hwnd, out var previous)
+                ? CallWindowProc(previous, hwnd, message, wParam, lParam)
+                : IntPtr.Zero;
+        }
         public static void ResizeCanvas(IntPtr c, System.Drawing.Rectangle bounds)
         {
             var host = GetParent(c);
@@ -289,6 +306,10 @@ public sealed class EngineService : IDisposable
         public static void SetOpacity(IntPtr c, byte a) => SetLayeredWindowAttributes(c, 0, a, 2);
         public static void MoveCanvas(IntPtr c, int x, int y, int w, int h) => SetWindowPos(c, IntPtr.Zero, x, y, w, h, 0x14);
         public static void PlaceAbove(IntPtr c, IntPtr lower) => SetWindowPos(lower, c, 0, 0, 0, 0, 0x53);
-        public static void SendToBottom(IntPtr c) => SetWindowPos(c, new IntPtr(1), 0, 0, 0, 0, 0x53);
+        public static void SendBehindDesktop(IntPtr c, System.Drawing.Rectangle bounds)
+        {
+            var host = HostFor(bounds);
+            if (host != IntPtr.Zero && GetParent(host) == GetParent(c)) SetWindowPos(c, host, 0, 0, 0, 0, 0x53);
+        }
     }
 }

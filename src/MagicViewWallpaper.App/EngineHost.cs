@@ -13,12 +13,12 @@ public sealed class EngineHost : System.Windows.Forms.ApplicationContext
     const string PipeName = "MagicViewWallpaper.Engine.v1";
     const string TaskName = "MagicViewWallpaperEngine";
     readonly SettingsStore store = new(); readonly EngineService engine; readonly SemaphoreSlim operationGate = new(1, 1);
-    readonly CancellationTokenSource shutdown = new(); readonly System.Windows.Forms.NotifyIcon tray; readonly System.Threading.Timer timer; readonly System.Windows.Forms.Timer trayRecoveryTimer; readonly System.Windows.Forms.Control uiDispatcher; readonly System.Drawing.Icon appIcon;
+    readonly CancellationTokenSource shutdown = new(); readonly System.Windows.Forms.NotifyIcon tray; readonly System.Threading.Timer timer; readonly System.Windows.Forms.Timer trayRecoveryTimer; readonly System.Windows.Forms.Control uiDispatcher; readonly System.Drawing.Icon appIcon; readonly DesktopRefreshService desktopRefresh;
     AppSettings settings; List<WallpaperItem> items = []; DateTime nextSwitch; bool busy; bool exiting; int explorerProcessId;
 
     public EngineHost()
     {
-        settings = store.Load(); engine = new(store); Reload(); nextSwitch = DateTime.Now.AddSeconds(settings.SwitchIntervalSeconds);
+        settings = store.Load(); engine = new(store); desktopRefresh = new(store); Reload(); nextSwitch = DateTime.Now.AddSeconds(settings.SwitchIntervalSeconds);
         uiDispatcher = new System.Windows.Forms.Control(); _ = uiDispatcher.Handle;
         appIcon = new System.Drawing.Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         var menu = new System.Windows.Forms.ContextMenuStrip();
@@ -42,7 +42,7 @@ public sealed class EngineHost : System.Windows.Forms.ApplicationContext
     async Task ApplyPath(string path)
     {
         if (!File.Exists(path)) return; await operationGate.WaitAsync(); busy = true;
-        try { var item = new WallpaperItem { Path = path }; await OnUi(() => engine.ApplyAsync(item, settings)); nextSwitch = DateTime.Now.AddSeconds(settings.SwitchIntervalSeconds); tray.Text = $"MagicView Wallpaper · {item.Name}"; }
+        try { var item = new WallpaperItem { Path = path }; await OnUi(() => engine.ApplyAsync(item, settings)); desktopRefresh.RequestRefresh(); nextSwitch = DateTime.Now.AddSeconds(settings.SwitchIntervalSeconds); tray.Text = $"MagicView Wallpaper · {item.Name}"; }
         catch (Exception ex) { store.Log(ex.ToString()); tray.ShowBalloonTip(3000, "壁纸应用失败", ex.Message, System.Windows.Forms.ToolTipIcon.Error); }
         finally { busy = false; operationGate.Release(); }
     }
@@ -110,7 +110,7 @@ public sealed class EngineHost : System.Windows.Forms.ApplicationContext
         try
         {
             var exe = Environment.ProcessPath!; var psi = new ProcessStartInfo("schtasks.exe") { UseShellExecute = false, CreateNoWindow = true };
-            if (enabled) { foreach (var a in new[] { "/Create", "/TN", TaskName, "/SC", "ONLOGON", "/DELAY", "0000:10", "/RL", "HIGHEST", "/TR", $"\"{exe}\" --engine", "/F" }) psi.ArgumentList.Add(a); }
+            if (enabled) { foreach (var a in new[] { "/Create", "/TN", TaskName, "/SC", "ONLOGON", "/DELAY", "0000:10", "/RL", "LIMITED", "/TR", $"\"{exe}\" --engine", "/F" }) psi.ArgumentList.Add(a); }
             else { foreach (var a in new[] { "/Delete", "/TN", TaskName, "/F" }) psi.ArgumentList.Add(a); }
             using var p = Process.Start(psi); p?.WaitForExit(5000); return p?.ExitCode == 0;
         }
@@ -133,6 +133,6 @@ public sealed class EngineHost : System.Windows.Forms.ApplicationContext
         return completion.Task;
     }
     protected override void Dispose(bool disposing) { if (disposing) Cleanup(); base.Dispose(disposing); }
-    void Cleanup() { if (exiting) return; exiting = true; shutdown.Cancel(); timer.Dispose(); trayRecoveryTimer.Stop(); trayRecoveryTimer.Dispose(); engine.Dispose(); tray.Visible = false; tray.Dispose(); appIcon.Dispose(); uiDispatcher.Dispose(); store.Log("后台引擎已退出。"); }
+    void Cleanup() { if (exiting) return; exiting = true; shutdown.Cancel(); timer.Dispose(); trayRecoveryTimer.Stop(); trayRecoveryTimer.Dispose(); desktopRefresh.Dispose(); engine.Dispose(); tray.Visible = false; tray.Dispose(); appIcon.Dispose(); uiDispatcher.Dispose(); store.Log("后台引擎已退出。"); }
     void ExitEngine() { Cleanup(); ExitThread(); }
 }
